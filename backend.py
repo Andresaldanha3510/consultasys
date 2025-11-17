@@ -1,25 +1,36 @@
 import sqlite3
-import webbrowser
-from flask import Flask, jsonify, request, send_from_directory, Response, send_file
-from flask_cors import CORS
-from datetime import datetime, timedelta
-import os
+import socket
+import threading
+import webview
 import sys
+import os
+import logging
 import json
 import csv
 import io
 import shutil
-from werkzeug.utils import secure_filename
+from flask import Flask, jsonify, request, send_from_directory, send_file
+from flask_cors import CORS
+from datetime import datetime, timedelta
 from werkzeug.security import generate_password_hash, check_password_hash
 from flask_login import LoginManager, UserMixin, login_user, logout_user, login_required, current_user
 
-# Configuração de Caminhos
-if getattr(sys, 'frozen', False):
-    APP_ROOT = os.path.dirname(sys.executable)
-else:
-    APP_ROOT = os.path.dirname(os.path.abspath(__file__))
+# --- SILENCIAR FLASK (Modo Produção/App) ---
+# Removemos a linha que causava o erro (WERKZEUG_RUN_MAIN)
+log = logging.getLogger('werkzeug')
+log.setLevel(logging.ERROR) 
 
-UPLOAD_FOLDER = os.path.join(APP_ROOT, 'uploads')
+# --- CONFIGURAÇÃO DE CAMINHOS ---
+if getattr(sys, 'frozen', False):
+    # Se for executável (PyInstaller):
+    BASE_DIR = sys._MEIPASS
+    DATA_DIR = os.path.dirname(sys.executable)
+else:
+    # Se for rodando no Python normal:
+    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+    DATA_DIR = BASE_DIR
+
+UPLOAD_FOLDER = os.path.join(DATA_DIR, 'uploads')
 if not os.path.exists(UPLOAD_FOLDER): os.makedirs(UPLOAD_FOLDER)
 
 app = Flask(__name__)
@@ -31,13 +42,25 @@ login_manager = LoginManager()
 login_manager.init_app(app)
 login_manager.login_view = 'login_error'
 
+# --- FUNÇÃO AUXILIAR IP ---
+def obter_ip_rede():
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.connect(('8.8.8.8', 80))
+        ip = s.getsockname()[0]
+    except Exception:
+        ip = '127.0.0.1'
+    finally:
+        s.close()
+    return f"http://{ip}:5000"
+
 class User(UserMixin):
     def __init__(self, id, username, role):
         self.id = id; self.username = username; self.role = role
 
 class Database:
     def __init__(self, db_name="clinica.db"):
-        self.db_path = os.path.join(APP_ROOT, db_name)
+        self.db_path = os.path.join(DATA_DIR, db_name)
         self.init_db()
 
     def conectar(self):
@@ -47,7 +70,6 @@ class Database:
 
     def init_db(self):
         conn = self.conectar(); c = conn.cursor()
-        
         c.execute("CREATE TABLE IF NOT EXISTS usuarios (id INTEGER PRIMARY KEY, username TEXT UNIQUE, password_hash TEXT, role TEXT)")
         c.execute("CREATE TABLE IF NOT EXISTS configuracoes (id INTEGER PRIMARY KEY, nome_clinica TEXT, endereco TEXT, telefone TEXT, cnpj TEXT)")
         c.execute("CREATE TABLE IF NOT EXISTS pacientes (id INTEGER PRIMARY KEY, nome TEXT, cpf TEXT, rg TEXT, data_nascimento DATE, sexo TEXT, telefone_principal TEXT, telefone_secundario TEXT, email TEXT, endereco TEXT, convenio_id INTEGER, observacoes_medicas TEXT, medicamentos_em_uso TEXT, responsavel TEXT, foto TEXT, ativo INTEGER DEFAULT 1, created_at DATETIME DEFAULT CURRENT_TIMESTAMP)")
@@ -58,8 +80,7 @@ class Database:
         c.execute("CREATE TABLE IF NOT EXISTS contas_receber (id INTEGER PRIMARY KEY, paciente_id INTEGER, descricao TEXT, valor_total REAL, valor_pago REAL DEFAULT 0, parcelas INTEGER DEFAULT 1, parcela_atual INTEGER DEFAULT 1, status TEXT DEFAULT 'Pendente', data_vencimento DATE, data_pagamento DATE, forma_pagamento TEXT, categoria TEXT, centro_custo TEXT, observacoes TEXT, comprovante TEXT)")
         c.execute("CREATE TABLE IF NOT EXISTS contas_pagar (id INTEGER PRIMARY KEY, fornecedor TEXT, descricao TEXT, valor_total REAL, valor_pago REAL DEFAULT 0, parcelas INTEGER DEFAULT 1, parcela_atual INTEGER DEFAULT 1, status TEXT DEFAULT 'Pendente', data_vencimento DATE, data_pagamento DATE, forma_pagamento TEXT, categoria TEXT, centro_custo TEXT, observacoes TEXT, comprovante TEXT)")
         c.execute("CREATE TABLE IF NOT EXISTS caixa (id INTEGER PRIMARY KEY, data_hora DATETIME DEFAULT CURRENT_TIMESTAMP, tipo TEXT, valor REAL, descricao TEXT, usuario TEXT, referencia_id INTEGER)")
-        for t in ['especialidades', 'salas', 'procedimentos']: 
-            c.execute(f"CREATE TABLE IF NOT EXISTS {t} (id INTEGER PRIMARY KEY, nome TEXT)")
+        for t in ['especialidades', 'salas', 'procedimentos']: c.execute(f"CREATE TABLE IF NOT EXISTS {t} (id INTEGER PRIMARY KEY, nome TEXT)")
         
         admin_pass = generate_password_hash('admin123')
         if not c.execute("SELECT * FROM usuarios WHERE username='admin'").fetchone():
@@ -79,8 +100,9 @@ def load_user(user_id):
 @login_manager.unauthorized_handler
 def login_error(): return jsonify({"erro": "Acesso negado"}), 401
 
+# --- ROTAS ---
 @app.route('/')
-def index(): return send_from_directory(APP_ROOT, 'sistema.html')
+def index(): return send_from_directory(BASE_DIR, 'sistema.html')
 
 @app.route('/api/login', methods=['POST'])
 def login():
@@ -103,12 +125,13 @@ def check_auth():
     if current_user.is_authenticated: return jsonify({"user": current_user.username})
     return jsonify({"erro": "Nao logado"}), 401
 
-# --- CONFIGURAÇÃO DA CLÍNICA ---
 @app.route('/api/config', methods=['GET'])
 @login_required
 def get_config():
     conn = db.conectar(); c = conn.execute("SELECT * FROM configuracoes WHERE id=1").fetchone(); conn.close()
-    return jsonify(dict(c) if c else {})
+    data = dict(c) if c else {}
+    data['ip_rede'] = obter_ip_rede()
+    return jsonify(data)
 
 @app.route('/api/config/salvar', methods=['POST'])
 @login_required
@@ -131,8 +154,8 @@ def mudar_senha():
 @login_required
 def backup():
     bkp = f"backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.db"
-    shutil.copy2(db.db_path, os.path.join(APP_ROOT, bkp))
-    return send_file(os.path.join(APP_ROOT, bkp), as_attachment=True)
+    shutil.copy2(db.db_path, os.path.join(DATA_DIR, bkp))
+    return send_file(os.path.join(DATA_DIR, bkp), as_attachment=True)
 
 @app.route('/api/dashboard_stats')
 @login_required
@@ -208,10 +231,8 @@ def save_prof():
 @app.route('/api/agenda', methods=['GET'])
 @login_required
 def list_ag():
-    hoje = datetime.now().strftime('%Y-%m-%d')
-    dt_ini = request.args.get('inicio', hoje); dt_fim = request.args.get('fim', hoje); prof = request.args.get('prof_id')
-    conn = db.conectar()
-    q = "SELECT a.*, p.nome as paciente, pr.nome as profissional FROM agendamentos a JOIN pacientes p ON a.paciente_id=p.id JOIN profissionais pr ON a.profissional_id=pr.id WHERE DATE(a.data_hora_inicio) BETWEEN ? AND ?"
+    hoje = datetime.now().strftime('%Y-%m-%d'); dt_ini = request.args.get('inicio', hoje); dt_fim = request.args.get('fim', hoje); prof = request.args.get('prof_id')
+    conn = db.conectar(); q = "SELECT a.*, p.nome as paciente, pr.nome as profissional FROM agendamentos a JOIN pacientes p ON a.paciente_id=p.id JOIN profissionais pr ON a.profissional_id=pr.id WHERE DATE(a.data_hora_inicio) BETWEEN ? AND ?"
     p = [dt_ini, dt_fim]
     if prof: q+=" AND a.profissional_id=?"; p.append(prof)
     r=[dict(x) for x in conn.execute(q+" ORDER BY a.data_hora_inicio", p).fetchall()]; conn.close(); return jsonify(r)
@@ -232,8 +253,7 @@ def save_ag():
 
 @app.route('/api/agenda/deletar/<int:id>', methods=['DELETE'])
 @login_required
-def del_ag(id):
-    conn=db.conectar(); conn.execute("DELETE FROM agendamentos WHERE id=?",(id,)); conn.commit(); conn.close(); return jsonify({"msg":"Deletado"})
+def del_ag(id): conn=db.conectar(); conn.execute("DELETE FROM agendamentos WHERE id=?",(id,)); conn.commit(); conn.close(); return jsonify({"msg":"Deletado"})
 
 @app.route('/api/agenda/status', methods=['POST'])
 @login_required
@@ -244,13 +264,10 @@ def st_ag(): conn=db.conectar(); conn.execute("UPDATE agendamentos SET status=? 
 def ini_atend_pac():
     d=request.json; h=datetime.now().strftime("%Y-%m-%d"); conn=db.conectar()
     ag = conn.execute("SELECT id FROM agendamentos WHERE paciente_id=? AND data_hora_inicio BETWEEN ? AND ? AND status NOT IN ('Cancelado','Finalizado')", (d['id'], f"{h} 00:00:00", f"{h} 23:59:59")).fetchone()
-    if ag:
-        conn.execute("UPDATE agendamentos SET status='Em Atendimento' WHERE id=?", (ag['id'],))
+    if ag: conn.execute("UPDATE agendamentos SET status='Em Atendimento' WHERE id=?", (ag['id'],))
     else:
         prof_id = d.get('prof_id')
-        if not prof_id: 
-            p = conn.execute("SELECT id FROM profissionais WHERE ativo=1 LIMIT 1").fetchone()
-            prof_id = p['id'] if p else 1 
+        if not prof_id: p = conn.execute("SELECT id FROM profissionais WHERE ativo=1 LIMIT 1").fetchone(); prof_id = p['id'] if p else 1 
         now = datetime.now(); ini_str = now.strftime("%Y-%m-%d %H:%M:%S"); fim_str = (now + timedelta(minutes=30)).strftime("%Y-%m-%d %H:%M:%S")
         conn.execute("INSERT INTO agendamentos (paciente_id, profissional_id, data_hora_inicio, duracao_minutos, data_hora_fim, status, tipo, observacoes) VALUES (?,?,?,?,?,?,?,?)", (d['id'], prof_id, ini_str, 30, fim_str, 'Em Atendimento', 'Encaixe', 'Criado via Atendimento'))
     conn.commit(); conn.close(); return jsonify({"msg": "Atualizado"})
@@ -276,7 +293,7 @@ def list_fin(t):
 def save_fin():
     d=request.json; conn=db.conectar(); 
     if not d.get('valor') or not d.get('venc'): return jsonify({"erro": "Valor/Vencimento obrigatórios"}), 400
-    t=d['tipo']; parc=int(d.get('parc',1)); val=float(d['valor'])/parc; dt=datetime.strptime(d['venc'],"%Y-%m-%d")
+    t=d['tipo']; parc=int(d.get('parc',1)); val=float(d['valor'])/parc; dt=datetime.strptime(d['venc'],"%Y-%m-%d");
     for i in range(parc):
         venc=(dt+timedelta(days=30*i)).strftime("%Y-%m-%d"); desc=f"{d['desc']} ({i+1}/{parc})" if parc>1 else d['desc']
         if t=='receber': conn.execute("INSERT INTO contas_receber (paciente_id, descricao, valor_total, data_vencimento, categoria, centro_custo, forma_pagamento, parcelas, parcela_atual) VALUES (?,?,?,?,?,?,?,?,?)",(d.get('paciente_id'),desc,val,venc,d['cat'],d.get('cc'),d['forma'],parc,i+1))
@@ -325,60 +342,26 @@ def list_pr(id): conn=db.conectar(); r=[dict(x) for x in conn.execute("SELECT p.
 @login_required
 def save_pr(): d=request.json; conn=db.conectar(); conn.execute("INSERT INTO prontuarios (paciente_id, profissional_id, data_atendimento, evolucao_clinica, diagnostico, prescricao, exames_solicitados) VALUES (?,?,?,?,?,?,?)",(d['paciente_id'],d['profissional_id'],datetime.now().strftime("%Y-%m-%d %H:%M"),d['evolucao'],d.get('diagnostico'),d.get('prescricao'),d.get('exames'))); conn.commit(); conn.close(); return jsonify({"msg":"Ok"})
 
-# --- RELATÓRIOS ROBUSTOS E NOVOS ---
 @app.route('/api/relatorios/gerar', methods=['POST'])
 @login_required
 def rel():
-    d = request.json; conn = db.conectar(); res = []
-    ini, fim = d['inicio'], d['fim']
-
+    d = request.json; conn = db.conectar(); res = []; ini, fim = d['inicio'], d['fim']
     if d['tipo'] == 'agendamentos':
-        q = """SELECT a.data_hora_inicio, p.nome as paciente, pr.nome as profissional, a.status 
-               FROM agendamentos a 
-               JOIN pacientes p ON a.paciente_id=p.id 
-               JOIN profissionais pr ON a.profissional_id=pr.id 
-               WHERE DATE(a.data_hora_inicio) BETWEEN ? AND ? ORDER BY a.data_hora_inicio"""
-        res = [dict(r) for r in conn.execute(q, (ini, fim)).fetchall()]
-    
+        res = [dict(r) for r in conn.execute("SELECT a.data_hora_inicio, p.nome as paciente, pr.nome as profissional, a.status FROM agendamentos a JOIN pacientes p ON a.paciente_id=p.id JOIN profissionais pr ON a.profissional_id=pr.id WHERE DATE(a.data_hora_inicio) BETWEEN ? AND ? ORDER BY a.data_hora_inicio", (ini, fim)).fetchall()]
     elif d['tipo'] == 'financeiro':
-        # Entradas
         r_in = conn.execute("SELECT data_vencimento as data, descricao, categoria, 'Receita' as tipo, valor_total as valor FROM contas_receber WHERE data_vencimento BETWEEN ? AND ?", (ini, fim)).fetchall()
-        # Saídas
         r_out = conn.execute("SELECT data_vencimento as data, descricao, categoria, 'Despesa' as tipo, valor_total as valor FROM contas_pagar WHERE data_vencimento BETWEEN ? AND ?", (ini, fim)).fetchall()
-        
-        for x in r_in: res.append(dict(x))
-        for x in r_out: res.append(dict(x))
+        res = [dict(x) for x in r_in] + [dict(x) for x in r_out]
         res.sort(key=lambda x: x['data'])
-
     elif d['tipo'] == 'profissionais':
-        q = """SELECT pr.nome as profissional, COUNT(a.id) as atendimentos, 
-               SUM(CASE WHEN a.status='Finalizado' THEN 1 ELSE 0 END) as finalizados
-               FROM agendamentos a
-               JOIN profissionais pr ON a.profissional_id=pr.id
-               WHERE DATE(a.data_hora_inicio) BETWEEN ? AND ?
-               GROUP BY pr.nome"""
-        res = [dict(r) for r in conn.execute(q, (ini, fim)).fetchall()]
-
+        res = [dict(r) for r in conn.execute("SELECT pr.nome as profissional, COUNT(a.id) as atendimentos, SUM(CASE WHEN a.status='Finalizado' THEN 1 ELSE 0 END) as finalizados FROM agendamentos a JOIN profissionais pr ON a.profissional_id=pr.id WHERE DATE(a.data_hora_inicio) BETWEEN ? AND ? GROUP BY pr.nome", (ini, fim)).fetchall()]
     elif d['tipo'] == 'pacientes':
         res = [dict(r) for r in conn.execute("SELECT nome, cpf, telefone_principal, email, created_at as cadastro FROM pacientes ORDER BY nome").fetchall()]
-        
     elif d['tipo'] == 'convenios':
-        q = """SELECT c.nome as convenio, COUNT(a.id) as atendimentos
-               FROM agendamentos a
-               JOIN pacientes p ON a.paciente_id=p.id
-               JOIN convenios c ON p.convenio_id=c.id
-               WHERE DATE(a.data_hora_inicio) BETWEEN ? AND ?
-               GROUP BY c.nome ORDER BY atendimentos DESC"""
-        res = [dict(r) for r in conn.execute(q, (ini, fim)).fetchall()]
-
+        res = [dict(r) for r in conn.execute("SELECT c.nome as convenio, COUNT(a.id) as atendimentos FROM agendamentos a JOIN pacientes p ON a.paciente_id=p.id JOIN convenios c ON p.convenio_id=c.id WHERE DATE(a.data_hora_inicio) BETWEEN ? AND ? GROUP BY c.nome ORDER BY atendimentos DESC", (ini, fim)).fetchall()]
     elif d['tipo'] == 'aniversariantes':
-        # Pega o mês da data de inicio
         mes = datetime.strptime(ini, "%Y-%m-%d").strftime("%m")
-        q = """SELECT nome, strftime('%d/%m', data_nascimento) as dia, telefone_principal 
-               FROM pacientes 
-               WHERE strftime('%m', data_nascimento) = ? ORDER BY strftime('%d', data_nascimento)"""
-        res = [dict(r) for r in conn.execute(q, (mes,)).fetchall()]
-
+        res = [dict(r) for r in conn.execute("SELECT nome, strftime('%d/%m', data_nascimento) as dia, telefone_principal FROM pacientes WHERE strftime('%m', data_nascimento) = ? ORDER BY strftime('%d', data_nascimento)", (mes,)).fetchall()]
     conn.close(); return jsonify(res)
 
 @app.route('/api/exportar/<tipo>')
@@ -394,36 +377,15 @@ def exportar(tipo):
     writer.writerows(cursor.fetchall()); conn.close()
     return Response(output.getvalue(), mimetype="text/csv", headers={"Content-disposition": f"attachment; filename={tipo}.csv"})
 
+def run_flask():
+    # use_reloader=False evita que o flask tente reiniciar, o que não funciona em thread
+    app.run(host='0.0.0.0', port=5000, threaded=True, use_reloader=False)
+
 if __name__ == '__main__':
-    import socket
-    
-    # Função para descobrir o IP do computador na rede Wi-Fi/Cabo
-    def obter_ip_rede():
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        try:
-            # Não conecta realmente, apenas para ver qual IP o roteador atribuiu
-            s.connect(('8.8.8.8', 80))
-            ip = s.getsockname()[0]
-        except Exception:
-            ip = '127.0.0.1'
-        finally:
-            s.close()
-        return ip
+    t = threading.Thread(target=run_flask)
+    t.daemon = True
+    t.start()
 
-    ip_local = obter_ip_rede()
-    porta = 5000
-    
-    print("="*50)
-    print(f"🚀 SISTEMA ONLINE!")
-    print(f"🔹 No Computador Principal, acesse: http://localhost:{porta}")
-    print(f"🔸 NOS OUTROS COMPUTADORES, digite: http://{ip_local}:{porta}")
-    print("="*50)
-    print("⚠️  IMPORTANTE: Se aparecer um aviso do Firewall do Windows,")
-    print("    clique em 'PERMITIR ACESSO' para que os outros consigam entrar.")
-    print("="*50)
-
-    # Abre o navegador no servidor automaticamente
-    webbrowser.open_new(f'http://127.0.0.1:{porta}')
-    
-    # host='0.0.0.0' é o segredo que libera o acesso para a rede
-    app.run(host='0.0.0.0', port=porta, debug=True)
+    # Inicia a janela nativa
+    webview.create_window("ClínicaSys Pro", "http://localhost:5000", min_size=(1024, 768))
+    webview.start()

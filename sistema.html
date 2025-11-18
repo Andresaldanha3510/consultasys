@@ -20,9 +20,20 @@
         
         #app-screen { display: none; height: 100vh; width: 100%; position: relative; z-index: 1; display: flex; }
         
-        /* RESPONSIVIDADE MENU */
-        aside { width: 260px; background: var(--bg-card); border-right: 1px solid var(--border); display: flex; flex-direction: column; padding: 1.5rem; transition: width 0.3s; }
-        @media (max-width: 800px) { aside { width: 70px; padding: 1rem 0.5rem; } aside h2, aside small, aside button span { display: none; } aside button { justify-content: center; } }
+        /* RESPONSIVIDADE MENU - AJUSTE AGRESSIVO NA MARGEM INFERIOR */
+        aside { 
+            width: 260px; 
+            background: var(--bg-card); 
+            border-right: 1px solid var(--border); 
+            display: flex; 
+            flex-direction: column; 
+            /* AQUI: 150px de padding inferior para fugir da barra do Windows */
+            padding: 1.5rem 1.5rem 150px 1.5rem; 
+            transition: width 0.3s; 
+            flex-shrink: 0; 
+            overflow-y: auto; 
+        }
+        @media (max-width: 800px) { aside { width: 70px; padding: 1rem 0.5rem 150px 0.5rem; } aside h2, aside small, aside button span { display: none; } aside button { justify-content: center; } }
         
         main { flex: 1; overflow-y: auto; padding: 2rem; min-width: 0; }
         
@@ -33,9 +44,20 @@
         .card { background: var(--bg-card); padding: 1.5rem; border-radius: 12px; border: 1px solid var(--border); margin-bottom: 1.5rem; overflow: auto; }
         .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 1rem; }
         
-        /* GRID DO DASHBOARD */
-        .dash-content { display: grid; grid-template-columns: 3fr 1fr; gap: 1.5rem; }
-        @media (max-width: 1000px) { .dash-content { grid-template-columns: 1fr; } }
+        /* DASHBOARD: CALENDÁRIO OCUPA MAIS ESPAÇO */
+        .dash-content { 
+            display: grid; 
+            grid-template-columns: 3fr 1fr; 
+            gap: 1.5rem; 
+        }
+        
+        @media (max-width: 1200px) { 
+            .dash-content { grid-template-columns: 2fr 1fr; } 
+        }
+        
+        @media (max-width: 1000px) { 
+            .dash-content { grid-template-columns: 1fr; } 
+        }
 
         .espera-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 1.5rem; }
         .espera-card { background: var(--bg-card); border: 1px solid var(--border); border-radius: 12px; padding: 1.5rem; position: relative; border-left: 6px solid var(--muted); display: flex; flex-direction: column; gap: 10px; box-shadow: 0 4px 6px rgba(0,0,0,0.2); transition: transform 0.2s; }
